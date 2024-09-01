@@ -1,0 +1,30 @@
+name = "ingest2"
+compatibility_date = "2024-08-25"
+
+[durable_objects]
+bindings = [
+  { name = "SessionRecorders", class_name = "SessionRecorder" }
+]
+
+[[migrations]]
+tag = "v1" # Should be unique for each entry
+new_classes = ["SessionRecorder"]
+
+# [vars]
+# MY_VAR = "my-variable"
+
+# [[kv_namespaces]]
+# binding = "MY_KV_NAMESPACE"
+# id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+[[r2_buckets]]
+binding = "SessionRecordingData"
+bucket_name = "session-recording-data"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "clerk-d1-prod"
+database_id = "foo"
+
+# [ai]
+# binding = "AI"

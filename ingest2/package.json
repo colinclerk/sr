@@ -1,0 +1,17 @@
+{
+  "name": "ingest2",
+  "scripts": {
+    "dev": "wrangler dev src/index.ts",
+    "deploy": "wrangler deploy --minify src/index.ts",
+    "setupdev": "npx wrangler d1 execute clerk-d1-prod --local --file=./d1migrations/0001_init.sql"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2",
+    "hono": "^4.5.8",
+    "xksuid": "^0.0.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240529.0",
+    "wrangler": "^3.57.2"
+  }
+}
