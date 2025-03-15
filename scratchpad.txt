@@ -1,0 +1,20 @@
+SessionRecording
+
+Session:
+
+SessionRecording
+- SessionRecordingClip
+    - Starts on page load or page focus
+    - Ends on page unload or page blur
+    - Goal: only one clip at a time.
+    - Goal: flag in video that tab has changed, detected by multiple socket connections
+- Use an alarm to end the recording
+
+
+
+
+Tasks:
+- Make a DurableObject for Client
+- Store the active SessionRecording in there
+- 
+

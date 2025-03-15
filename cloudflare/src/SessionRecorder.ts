@@ -1,11 +1,13 @@
 import { compress, decompressSync, strFromU8 } from "fflate";
 import { generate as genKsuid } from "xksuid";
 
-type MetaType = {
+type MetaTypeDO = {
+  lastLoad: number;
   curRecId: string;
   curKey: number;
   curSize: number;
-  breakpoints: { k: number; i: number }[]; // key, index
+  loadMap: Record<string, number>;
+  breakpoints: { k: number; i: number; l: number }[]; // key, index
 };
 
 async function handleErrors(request, func) {
@@ -32,7 +34,7 @@ export class SessionRecorder {
   env: Env;
   DB: D1Database;
   storage: DurableObjectStorage;
-  connections: Map<WebSocket, { connectionId: string }>;
+  connections: Map<WebSocket, { connectionId: number }>;
 
   // chunkSize = 131072;
   chunkSize = 1024;
@@ -70,14 +72,21 @@ export class SessionRecorder {
   async fetch(request: Request) {
     return await handleErrors(request, async () => {
       let url = new URL(request.url);
-
-      switch (url.pathname) {
+      const first2 = url.pathname.split("/").slice(0, 3).join("/");
+      switch (first2) {
         case "/read_current": {
           return new Response(JSON.stringify(await this.readCurrent()), {
             status: 200,
           });
         }
+        case "/read_current_meta": {
+          return new Response(JSON.stringify(await this.storage.get("meta")), {
+            status: 200,
+          });
+        }
         case "/sr/ws": {
+          const loadUUID = url.pathname.split("/")[3];
+          console.log(loadUUID);
           // The request is to `/api/room/<name>/websocket`. A client is trying to establish a new
           // WebSocket session.
           if (request.headers.get("Upgrade") != "websocket") {
@@ -95,7 +104,7 @@ export class SessionRecorder {
           let pair = new WebSocketPair();
 
           // We're going to take pair[1] as our end, and return pair[0] to the client.
-          await this.handleConnection(pair[1]);
+          await this.handleConnection(pair[1], loadUUID);
 
           // Now we return the other end of the pair to the client.
           return new Response(null, { status: 101, webSocket: pair[0] });
@@ -107,41 +116,69 @@ export class SessionRecorder {
     });
   }
 
-  async handleConnection(webSocket: WebSocket) {
+  async handleConnection(webSocket: WebSocket, loadUUID: string) {
+    let isNew = false;
+    let metaDO = await this.storage.get<MetaTypeDO>("meta");
+
+    if (!metaDO) {
+      isNew = true;
+      const newRecId = await this.getId();
+      metaDO = {
+        lastLoad: 0,
+        curRecId: newRecId,
+        curKey: 0,
+        curSize: 0,
+        loadMap: {},
+        breakpoints: [],
+      };
+    }
+
+    let connId: number;
+    if (metaDO.loadMap[loadUUID]) {
+      connId = metaDO.loadMap[loadUUID];
+    } else {
+      metaDO.lastLoad += 1;
+      connId = metaDO.lastLoad;
+      metaDO.loadMap[loadUUID] = connId;
+    }
+
+    console.log("CONN ID IS: ", connId);
+
     // Accept our end of the WebSocket. This tells the runtime that we'll be terminating the
     // WebSocket in JavaScript, not sending it elsewhere.
     this.state.acceptWebSocket(webSocket);
 
     // attach limiterId to the webSocket so it survives hibernation
-    let meta = { connectionId: self.crypto.randomUUID() };
+    let meta = { connectionId: connId };
     webSocket.serializeAttachment({
       ...webSocket.deserializeAttachment(),
       ...meta,
     });
     this.connections.set(webSocket, meta);
+
+    if (isNew) {
+      await this.DB.prepare(
+        "INSERT INTO SessionRecordings (ID, Bucketed) VALUES (?1, ?2)"
+      )
+        .bind(metaDO.curRecId, 0)
+        .run();
+    }
+    await this.storage.put("meta", metaDO);
   }
 
-  async saveEvents(buffer: ArrayBuffer) {
+  async saveEvents(buffer: ArrayBuffer, connectionId: number) {
     console.log("Save Called");
 
-    let isNew = false;
-    let meta = await this.storage.get<MetaType>("meta");
+    let metaDO = await this.storage.get<MetaTypeDO>("meta");
 
-    if (!meta) {
-      isNew = true;
-      const newRecId = await this.getId();
-      meta = {
-        curRecId: newRecId,
-        curKey: 0,
-        curSize: 0,
-        breakpoints: [],
-      };
+    if (!metaDO) {
+      throw new Error("Something went wrong. Could not find DO metadata.");
     }
 
     let curKeyVal =
-      meta.curSize === 0
+      metaDO.curSize === 0
         ? new Uint8Array()
-        : ((await this.storage.get(`d${meta.curKey}`)) as Uint8Array);
+        : ((await this.storage.get(`d${metaDO.curKey}`)) as Uint8Array);
 
     const bytesToSave = buffer.byteLength;
     console.log("Need to save", bytesToSave);
@@ -149,62 +186,55 @@ export class SessionRecorder {
     let bytesSaved = 0;
     while (bytesToSave !== bytesSaved) {
       console.log("In loop, so far saved", bytesSaved);
-      const availableInCurKey = this.chunkSize - meta.curSize;
+      const availableInCurKey = this.chunkSize - metaDO.curSize;
       const bytesLeftToSave = bytesToSave - bytesSaved;
       if (availableInCurKey >= bytesLeftToSave) {
         console.log("hitting no more overflow");
         let newVal;
         const dataToSave = new Uint8Array(buffer, bytesSaved);
-        if (meta.curSize === 0) {
+        if (metaDO.curSize === 0) {
           newVal = dataToSave;
         } else {
-          newVal = new Uint8Array(meta.curSize + bytesToSave);
+          newVal = new Uint8Array(metaDO.curSize + bytesToSave);
           newVal.set(curKeyVal);
-          newVal.set(dataToSave, meta.curSize);
+          newVal.set(dataToSave, metaDO.curSize);
         }
-        await this.storage.put(`d${meta.curKey}`, newVal);
-        meta.curSize += bytesToSave - bytesSaved;
-        meta.breakpoints.push({
-          k: meta.curKey,
-          i: meta.curSize,
+        await this.storage.put(`d${metaDO.curKey}`, newVal);
+        metaDO.curSize += bytesToSave - bytesSaved;
+        metaDO.breakpoints.push({
+          k: metaDO.curKey,
+          i: metaDO.curSize,
+          l: connectionId,
         });
         break;
       } else {
         console.log("Hitting overflow");
         const newVal = new Uint8Array(this.chunkSize);
-        if (meta.curSize === 0) {
+        if (metaDO.curSize === 0) {
           newVal.set(new Uint8Array(buffer, bytesSaved, this.chunkSize));
           bytesSaved += this.chunkSize;
         } else {
-          const bytesAvailable = this.chunkSize - meta.curSize;
+          const bytesAvailable = this.chunkSize - metaDO.curSize;
           newVal.set(curKeyVal);
-          newVal.set(new Uint8Array(buffer, 0, bytesAvailable), meta.curSize);
+          newVal.set(new Uint8Array(buffer, 0, bytesAvailable), metaDO.curSize);
           bytesSaved += bytesAvailable;
         }
-        await this.storage.put(`d${meta.curKey}`, newVal);
+        await this.storage.put(`d${metaDO.curKey}`, newVal);
         curKeyVal = new Uint8Array();
-        meta.curKey += 1;
-        meta.curSize = 0;
+        metaDO.curKey += 1;
+        metaDO.curSize = 0;
       }
     }
-    if (isNew) {
-      await this.DB.prepare(
-        "INSERT INTO SessionRecordings (ID, Bucketed) VALUES (?1, ?2)"
-      )
-        .bind(meta.curRecId, 0)
-        .run();
-    }
-    await this.storage.put("meta", meta);
-    console.log("Saving meta", meta);
+    await this.storage.put("meta", metaDO);
+    console.log("Saving meta", metaDO);
   }
 
   async readCurrent() {
-    const meta = await this.storage.get<MetaType>("meta");
+    const meta = await this.storage.get<MetaTypeDO>("meta");
     if (!meta) {
       throw new Error("Nothing current to read.");
     }
     if (meta.breakpoints.length === 0) {
-      console.log("no brkpoints");
       return [];
     }
 
@@ -242,8 +272,11 @@ export class SessionRecorder {
         }
         compressedSegment.set(chunks[end.k].slice(0, end.i), offset);
       }
+      console.log(j, `!${strFromU8(decompressSync(compressedSegment))}!`);
       const data = JSON.parse(strFromU8(decompressSync(compressedSegment)));
-      if (data[0].type === 4) {
+      console.log(j, data);
+      if (!data[0]) {
+      } else if (data[0].type === 4) {
         // Create new segment
         segments.push(data);
       } else {
@@ -251,8 +284,6 @@ export class SessionRecorder {
         segments[segments.length - 1].push(...data);
       }
     }
-    console.log(segments);
-
     return segments;
   }
 
@@ -269,7 +300,8 @@ export class SessionRecorder {
       if (!connection) {
         return;
       }
-      await this.saveEvents(message);
+      const { connectionId } = connection;
+      await this.saveEvents(message, connectionId);
       // const msg = new Uint8Array(compressedmsg)
       // const { connectionId } = connection;
       // const msg = strFromU8(decompressSync(new Uint8Array(compressedmsg), {}));

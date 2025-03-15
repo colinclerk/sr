@@ -54,6 +54,23 @@ app.get("/recordings", async (c) => {
   return c.json(results);
 });
 
+app.get("/recordings/:id/meta", async (c) => {
+  const id = c.env.SessionRecorders.idFromName("sess_12345");
+  const stub = c.env.SessionRecorders.get(id);
+  const dataFetch = await stub.fetch(
+    new URL("/read_current_meta", c.req.url),
+    c.req
+  );
+  return c.json(await dataFetch.json());
+
+  // const { id } = c.req.param();
+  // const DB = c.env.DB as D1Database;
+  // const data = await DB.prepare("SELECT * FROM SessionRecordings WHERE ID=?1")
+  //   .bind(id)
+  //   .first();
+  // return c.json(data);
+});
+
 app.get("/recordings/:id", async (c) => {
   const id = c.env.SessionRecorders.idFromName("sess_12345");
   const stub = c.env.SessionRecorders.get(id);
@@ -118,7 +135,7 @@ app.get("/record", (c) => {
 export default {
   async fetch(request: Request, env: Env) {
     const url = new URL(request.url);
-    if (request.method === "GET" && url.pathname === "/sr/ws") {
+    if (request.method === "GET" && url.pathname.startsWith("/sr/ws")) {
       console.log("in short");
       const id = env.SessionRecorders.idFromName("sess_12345");
       const stub = env.SessionRecorders.get(id);

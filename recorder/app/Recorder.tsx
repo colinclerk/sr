@@ -1,18 +1,11 @@
 "use client";
 import { useEffect } from "react";
-import { record } from "rrweb";
-import ClerkRecorder from "./record";
+import { ClerkRecorderManager } from "./record";
 export default function Recorder() {
   useEffect(() => {
-    // record({
-    //   emit(event) {
-    //     // push event into the events array
-    //     console.log(JSON.stringify(event));
-    //   },
-    // });
-    if (window && !window.hasOwnProperty("ClerkRecorder")) {
+    if (window && !window.hasOwnProperty("ClerkRecorderManager")) {
       // @ts-ignore
-      window.ClerkRecorder = new ClerkRecorder();
+      window.ClerkRecorderManager = new ClerkRecorderManager();
     }
   });
   return null;
